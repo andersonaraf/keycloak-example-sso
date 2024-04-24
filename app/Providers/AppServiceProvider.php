@@ -2,7 +2,9 @@
 
 namespace App\Providers;
 
+use Illuminate\Contracts\Container\BindingResolutionException;
 use Illuminate\Support\ServiceProvider;
+use Laravel\Socialite\Facades\Socialite;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -16,9 +18,18 @@ class AppServiceProvider extends ServiceProvider
 
     /**
      * Bootstrap any application services.
+     * @throws BindingResolutionException
      */
     public function boot(): void
     {
         //
+        $socialite = $this->app->make('Laravel\Socialite\Contracts\Factory');
+        $socialite->extend(
+            'keycloak',
+            static function ($app) use ($socialite) {
+                $config = $app['config']['services.keycloak'];
+                return $socialite->buildProvider(KeycloakProvider::class, $config);
+            }
+        );
     }
 }
