@@ -5,8 +5,8 @@ namespace App\Providers;
 use GuzzleHttp\RequestOptions;
 use Illuminate\Support\Arr;
 use Laravel\Socialite\Two\AbstractProvider;
-use Laravel\Socialite\Two\InvalidStateException;
 use Laravel\Socialite\Two\ProviderInterface;
+use SocialiteProviders\Manager\Exception\InvalidArgumentException;
 use SocialiteProviders\Manager\OAuth2\User;
 
 /**
@@ -14,83 +14,131 @@ use SocialiteProviders\Manager\OAuth2\User;
  */
 class KeycloakProvider extends AbstractProvider implements ProviderInterface
 {
+    public const IDENTIFIER = 'KEYCLOAK';
 
-    protected function getAuthUrl($state): string
+    protected $scopeSeparator = ' ';
+
+    protected $scopes = ['openid'];
+
+    /**
+     * {@inheritdoc}
+     */
+    public static function additionalConfigKeys()
     {
-        return $this->buildAuthUrlFromBase(
-            config('services.keycloak.base_url') . '/realms/daara/protocol/openid-connect/auth',
-            $state
-        );
+        return ['base_url', 'realms'];
     }
 
-    protected function getTokenUrl(): string
+    protected function getBaseUrl()
     {
-        // TODO: Implement getTokenUrl() method.
-        return config('services.keycloak.base_url') . '/realms/daara/protocol/openid-connect/token';
-
+        return rtrim(rtrim($this->getConfig('base_url'), '/').'/realms/'.$this->getConfig('realms', 'master'), '/');
     }
 
+    /**
+     * {@inheritdoc}
+     */
+    protected function getAuthUrl($state)
+    {
+        return $this->buildAuthUrlFromBase($this->getBaseUrl().'/protocol/openid-connect/auth', $state);
+    }
+
+    /**
+     * {@inheritdoc}
+     */
+    protected function getTokenUrl()
+    {
+        return $this->getBaseUrl().'/protocol/openid-connect/token';
+    }
+
+    /**
+     * {@inheritdoc}
+     */
     protected function getUserByToken($token)
     {
-        // TODO: Implement getUserByToken() method.
-        $response = $this->getHttpClient()->get(
-            config('services.keycloak.base_url') . '/realms/daara/protocol/openid-connect/userinfo',
-            [
-                'headers' => [
-                    'Accept' => 'application/json',
-                    'Authorization' => 'Bearer ' . $token,
-                ],
-            ]
-        );
+        $response = $this->getHttpClient()->get($this->getBaseUrl().'/protocol/openid-connect/userinfo', [
+            RequestOptions::HEADERS => [
+                'Authorization' => 'Bearer '.$token,
+            ],
+        ]);
 
-        return json_decode($response->getBody(), true);
+        return json_decode((string) $response->getBody(), true);
     }
 
-    protected function mapUserToObject(array $user): \Laravel\Socialite\Two\User|User
+    /**
+     * {@inheritdoc}
+     */
+    protected function mapUserToObject(array $user)
     {
-        // TODO: Implement mapUserToObject() method.
         return (new User())->setRaw($user)->map([
-            'id' => $user['sub'],
-            'name' => $user['name'],
-            'email' => $user['email'],
+            'id'        => Arr::get($user, 'sub'),
+            'nickname'  => Arr::get($user, 'preferred_username'),
+            'name'      => Arr::get($user, 'name'),
+            'email'     => Arr::get($user, 'email'),
         ]);
     }
 
-    protected function getTokenFields($code): array
+    /**
+     * {@inheritdoc}
+     */
+    protected function getTokenFields($code)
     {
-        return [
+        return array_merge(parent::getTokenFields($code), [
             'grant_type' => 'authorization_code',
-            'client_id' => config('services.keycloak.client_id'),
-            'client_secret' => config('services.keycloak.client_secret'),
-            'redirect_uri' => config('services.keycloak.redirect'),
-            'code' => $code,
-        ];
+        ]);
     }
 
-    protected function getCodeFields($state = null): array
+    /**
+     * Return logout endpoint with redirect_uri, clientId, idTokenHint
+     * and optional parameters by a key value array.
+     *
+     * @param string|null $redirectUri
+     * @param string|null $clientId
+     * @param string|null $idTokenHint
+     * @param array       $additionalParameters
+     *
+     * @throws InvalidArgumentException
+     *
+     * @return string
+     */
+    public function getLogoutUrl(?string $redirectUri = null, ?string $clientId = null, ?string $idTokenHint = null, ...$additionalParameters): string
     {
-        return array_merge(
-            parent::getCodeFields($state),
-            ['response_mode' => 'query']
-        );
-    }
+        $logoutUrl = $this->getBaseUrl().'/protocol/openid-connect/logout';
 
-    public function user(): \Laravel\Socialite\Two\User|User|array|\Laravel\Socialite\Contracts\User|null
-    {
-        if ($this->hasInvalidState()) {
-            throw new InvalidStateException;
+        // Keycloak v18+ or before
+        if ($redirectUri === null) {
+            return $logoutUrl;
         }
 
-        $response = $this->getAccessTokenResponse($this->getCode());
+        // Before Keycloak v18
+        if ($clientId === null && $idTokenHint === null) {
+            return $logoutUrl.'?redirect_uri='.urlencode($redirectUri);
+        }
 
-        $user = $this->mapUserToObject($this->getUserByToken(
-            $token = Arr::get($response, 'access_token')
-        ));
+        // Keycloak v18+
+        // https://www.keycloak.org/docs/18.0/securing_apps/index.html#logout
+        // https://openid.net/specs/openid-connect-rpinitiated-1_0.html
+        $logoutUrl .= '?post_logout_redirect_uri='.urlencode($redirectUri);
 
-        return array_merge((array)$user, [
-            'access_token' => $token,
-            'refresh_token' => Arr::get($response, 'refresh_token'),
-            'expires_in' => Arr::get($response, 'expires_in'),
-        ]);
+        // Either clientId or idTokenHint
+        // is required for the post redirect to work.
+        if ($clientId !== null) {
+            $logoutUrl .= '&client_id='.urlencode($clientId);
+        }
+
+        if ($idTokenHint !== null) {
+            $logoutUrl .= '&id_token_hint='.urlencode($idTokenHint);
+        }
+
+        foreach ($additionalParameters as $parameter) {
+            if (!is_array($parameter) || sizeof($parameter) > 1) {
+                throw new InvalidArgumentException('Invalid argument. Expected an array with a key and a value.');
+            }
+
+            $parameterKey = array_keys($parameter)[0];
+            $parameterValue = array_values($parameter)[0];
+
+            $logoutUrl .= "&{$parameterKey}=".urlencode($parameterValue);
+        }
+
+        return $logoutUrl;
     }
 }

@@ -32,6 +32,7 @@ class LoginController extends Controller
             DB::commit();
 
             Auth::login($user);
+            dd(Auth::user());
 
             return redirect()->intended('/whatever-your-route-look-like');
         } catch (Exception $e) {

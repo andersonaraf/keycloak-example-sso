@@ -20,6 +20,9 @@ class User extends Authenticatable
         'name',
         'email',
         'password',
+        'keycloak_auth_id',
+        'keycloak_access_token',
+        'keycloak_refresh_token',
     ];
 
     /**
